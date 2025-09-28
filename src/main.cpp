@@ -4,54 +4,52 @@
 #define FILL 21
 #define O2 18
 #define IGNI 25
-#define NC 19
 #define CAN_RX 27
 #define CAN_TX 13
-bool PLC_DEAD = true;
+
+constexpr short outpins[4] = {DUMP, FILL, O2, IGNI};
 bool iginitionfireFlag = false;
-unsigned long lastTime = 0;
+unsigned long lastTime = 0; /*check if CANBUS is alive or not*/
 unsigned long lastFireTime = 0;
 bool ignbtnflag;
 unsigned long lastigmbtntime = 0;
 CAN_CREATE CAN(true);
+/*CAN idは0x101*/
 void setup()
 {
   Serial.begin(115200);
   // tx,rxの順に、  32,33:コンパネ　　13,27:中継
   Serial.println("CAN Sender");
   // 100 kbpsでCANを動作させる
-  if (CAN.begin(100E3, CAN_RX, CAN_TX, 10))
+  if (CAN.begin(100E3, CAN_RX, CAN_TX))
   {
     Serial.println("Starting CAN failed!");
     while (1)
       ;
   }
-  pinMode(25, OUTPUT);
-  pinMode(23, OUTPUT);
-  pinMode(22, OUTPUT);
-  pinMode(21, OUTPUT);
-  pinMode(19, OUTPUT);
-  pinMode(18, OUTPUT);
-  pinMode(17, OUTPUT);
+  for (short i = 0; i < 4; i++)
+  {
+    pinMode(outpins[i], OUTPUT);
+    digitalWrite(outpins[i], LOW);
+  }
 }
-
 /**/
 void triggerIgnition()
 {
-  if (iginitionfireFlag == true)
+  if (iginitionfireFlag)
   {
-    Serial.println("ignition");
-    Serial.println(millis() - lastFireTime);
-    if (25000 > (millis() - lastFireTime) && (millis() - lastFireTime) > 20000)
+    // Serial.println("ignition");
+    // Serial.println(millis() - lastFireTime);
+    if ((25000 > (millis() - lastFireTime)) && ((millis() - lastFireTime) > 20000))
     {
       uint8_t data[4] = {186, 20, 0, 0};
-      if (CAN.sendData(0x300, data, 4))
+      if (CAN.sendData(0x300, data, 4)) /*to main_valve*/
       {
         Serial.println("failed to send CAN data");
       }
       digitalWrite(IGNI, HIGH);
     }
-    else if (millis() - lastFireTime > 25000)
+    else if ((millis() - lastFireTime) > 25000)
     {
       digitalWrite(IGNI, LOW);
       if (ignbtnflag == false)
@@ -67,7 +65,7 @@ void triggerIgnition()
     Serial.println("because of flag");
   }
 }
-void missingCan()
+void missingCan() /*check if ctrl_panel is dead or not*/
 {
   if (millis() - lastTime > 10000)
   {
@@ -85,12 +83,11 @@ void loop()
     can_return_t message; // 最大8文字+改行文字が送信される
     while (!CAN.readWithDetail(&message))
     {
-      if (message.id == 0x101)
+      if (message.id == 0x101) /*plc's CAN_id*/
       {
-        PLC_DEAD = false;
         lastTime = millis();
         uint8_t data[4] = {0, 0, 0, 0};
-        if (CAN.sendData(0x403, data, 4))
+        if (CAN.sendData(0x403, data, 4)) /*to control_panel*/
         {
         }
         if (((message.data[0] >> 3) & (uint8_t)0x1) == ((uint8_t)0x1))
