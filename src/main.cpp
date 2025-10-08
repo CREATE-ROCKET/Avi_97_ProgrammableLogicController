@@ -2,19 +2,27 @@
 #include "CANCREATE.h"
 #define DUMP 23
 #define FILL 21
-#define O2 18
+#define NOD 18 /*NOD経路のサブバルブ（初期燃焼実験だけ電磁弁）*/
 #define IGNI 25
 #define CAN_RX 27
 #define CAN_TX 13
+#define NICHROME 26
 
-constexpr short outpins[4] = {DUMP, FILL, O2, IGNI};
+constexpr short outpins[4] = {DUMP, FILL, NOD, IGNI};
+constexpr short waitTime = 3000; /*点火ボタンを押してから、nichrome線が通電するまでの時間(ms)*/
+constexpr short TimeOut = 5000;
+
 bool iginitionfireFlag = false;
 unsigned long lastTime = 0; /*check if CANBUS is alive or not*/
 unsigned long lastFireTime = 0;
+unsigned long fireAfterNodTime = 0;   /*NOD電磁弁(本当はサブバルブ)に通電した数秒後にignitorに通電*/
+unsigned long NodTime = 0;            /*Nichrome線に通電した数秒後にNOD電磁弁を通電*/
+unsigned long valveAfterfireTime = 0; /*ignitorに通電*/
+bool NodOpenFlag = false;
 bool ignbtnflag;
 unsigned long lastigmbtntime = 0;
 CAN_CREATE CAN(true);
-/*CAN idは0x101*/
+/*PLCのCAN idは0x101*/
 void setup()
 {
   Serial.begin(115200);
@@ -33,23 +41,43 @@ void setup()
     digitalWrite(outpins[i], LOW);
   }
 }
-/**/
+
 void triggerIgnition()
 {
   if (iginitionfireFlag)
   {
     // Serial.println("ignition");
     // Serial.println(millis() - lastFireTime);
-    if ((25000 > (millis() - lastFireTime)) && ((millis() - lastFireTime) > 20000))
+    if ((TimeOut > (millis() - lastFireTime)) && ((millis() - lastFireTime) > waitTime))
     {
       uint8_t data[4] = {186, 20, 0, 0};
       if (CAN.sendData(0x300, data, 4)) /*to main_valve*/
       {
         Serial.println("failed to send CAN data");
       }
-      digitalWrite(IGNI, HIGH);
+      if (CAN.sendData(0x10a, data, 4)) /*to nichrome controller*/
+      {
+        Serial.println("failed to send CAN data");
+      }
+      if (millis() - NodTime > 5000 && NodOpenFlag)
+      {
+        digitalWrite(NOD, HIGH);
+        fireAfterNodTime = millis();
+      }
+      if (millis() - fireAfterNodTime > 8000)
+      {
+        digitalWrite(IGNI, HIGH);
+        valveAfterfireTime = millis();
+      }
+      if (millis() - valveAfterfireTime > 1000) /*NichromeとignitorだけLOWにする*/
+      {
+        uint8_t message[4] = {};
+        if (CAN.sendData(0x10b, message, 4))
+        {
+        }
+      }
     }
-    else if ((millis() - lastFireTime) > 25000)
+    else if ((millis() - lastFireTime) > TimeOut)
     {
       digitalWrite(IGNI, LOW);
       if (ignbtnflag == false)
@@ -70,7 +98,8 @@ void missingCan() /*check if ctrl_panel is dead or not*/
   if (millis() - lastTime > 10000)
   {
     digitalWrite(IGNI, LOW);
-    digitalWrite(O2, LOW);
+    digitalWrite(NICHROME, LOW);
+    NodOpenFlag = false;
     Serial.println("IGN is low bcaouse of missing time");
   }
 }
@@ -88,8 +117,7 @@ void loop()
         lastTime = millis();
         uint8_t data[4] = {0, 0, 0, 0};
         if (CAN.sendData(0x403, data, 4)) /*to control_panel*/
-        {
-        }
+          ;
         if (((message.data[0] >> 3) & (uint8_t)0x1) == ((uint8_t)0x1))
         {
           uint8_t data[4] = {100, 0, 0, 0};
@@ -108,9 +136,9 @@ void loop()
           {
             lastigmbtntime = millis();
             lastFireTime = millis();
+            NodTime = millis();
           }
           ignbtnflag = true;
-          digitalWrite(O2, HIGH);
           if (iginitionfireFlag == false && millis() - lastigmbtntime > 1000) // 1秒以上押し続けたら点火
           {
             iginitionfireFlag = true;
@@ -124,7 +152,7 @@ void loop()
         {
           // iginitionfireFlag=false;
           ignbtnflag = false;
-          digitalWrite(O2, LOW);
+          digitalWrite(NOD, LOW);
           if (iginitionfireFlag == false)
           {
             digitalWrite(IGNI, LOW);
@@ -146,13 +174,14 @@ void loop()
         else
         {
           digitalWrite(DUMP, LOW);
+          digitalWrite(NOD, LOW);
         }
         if (((message.data[0] >> 4) & (uint8_t)0x1) == ((uint8_t)0x1))
         {
           uint8_t data[4] = {51, 0, 0, 0};
           if (CAN.sendData(0x300, data, 4))
             ;
-          Serial.println("valve set");
+          // Serial.println("valve set");
           iginitionfireFlag = false; // バルブリセットで点火カウントダウンも停止
         }
       }
