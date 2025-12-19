@@ -211,6 +211,7 @@ void executeIgnitionSequence()
   unsigned int elapsed = millis() - sequenceStartTime;
   if (elapsed > IGNITION_SEQUENCE_TIMEOUT_MS)
   {
+    digitalWrite(O2_PIN, LOW);
     digitalWrite(IGNI_PIN, LOW);
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     ignitionState = TIMEOUT;
@@ -230,6 +231,9 @@ void executeIgnitionSequence()
     // O2電磁弁をOFF
     digitalWrite(O2_PIN, LOW);
     digitalWrite(IGNI_PIN, LOW);
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    ignitionState = TIMEOUT;
+    xSemaphoreGive(stateMutex);
   }
 }
 
