@@ -211,10 +211,10 @@ void executeIgnitionSequence()
   unsigned int elapsed = millis() - sequenceStartTime;
   if (elapsed > IGNITION_SEQUENCE_TIMEOUT_MS)
   {
+    digitalWrite(IGNI_PIN, LOW);
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     ignitionState = TIMEOUT;
     xSemaphoreGive(stateMutex);
-    digitalWrite(IGNI_PIN, LOW);
     return;
   }
   if (elapsed > IGNITION_WAIT_MS)
@@ -248,11 +248,12 @@ void checkCtrlPanelConnectionTask(void *pvParameters)
 
     if (millis() - lastTime > CTRL_PANEL_TIMEOUT_MS)
     {
+      // missing control panel connection, reset state
       digitalWrite(IGNI_PIN, LOW);
       digitalWrite(O2_PIN, LOW);
-
+      digitalWrite(FILL_PIN, LOW);
+      digitalWrite(DUMP_PIN, LOW);
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      // missing control panel connection, reset state
       ignitionState = TIMEOUT;
       xSemaphoreGive(stateMutex);
     }
