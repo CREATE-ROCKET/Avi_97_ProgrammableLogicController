@@ -15,10 +15,9 @@ constexpr uint8_t CAN_TX_PIN = 13;
 
 // --- CAN ID Definitions ---
 constexpr uint32_t CAN_ID_FROM_CONTROL_PANEL = 0x101;
+constexpr uint32_t CAN_ID_TO_CTRL_ACK = 0x103;
+constexpr uint32_t CAN_ID_FROM_CTRL_ACK = 0x104;
 constexpr uint32_t CAN_ID_TO_MAIN_VALVE = 0x105;
-constexpr uint32_t CAN_ID_MAIN_VALVE_OPEN_REQUEST = 0x10b;
-constexpr uint32_t CAN_ID_PLC_ACK = 0x103;
-constexpr uint32_t CAN_ID_FD_DATA = 0x10c;
 
 // --- Timing and Threshold Constants ---
 constexpr unsigned long long IGNITION_WAIT_MS = 4500;              // 点火ボタンを押し続けてからイグナイターをONにするまでの時間 (ms)
@@ -32,7 +31,7 @@ enum IgnitionState
   IDLE,
   BUTTON_HELD,     // 点火ボタン押下中
   SEQUENCE_ACTIVE, // 点火シーケンス実行中
-  IGNITION_TIMEOUT // タイムアウト後
+  TIMEOUT          // 終状態
 };
 
 // --- Global State Variables & Mutex ---
@@ -46,9 +45,9 @@ CAN_CREATE CAN(true);
 
 // --- Task & Function Prototypes ---
 void CANRecvTask(void *pvParameters);
+void checkCtrlPanelConnectionTask(void *pvParameters);
 void handleCANMessage(const can_return_t &message);
 void executeIgnitionSequence();
-void checkCtrlPanelConnection();
 
 void setup()
 {
@@ -76,29 +75,29 @@ void setup()
       ;
   }
   delay(1000);
-  switch (CAN.test())
-  {
-  case CAN_SUCCESS:
-    Serial.println("Success!!!");
-    break;
-  case CAN_UNKNOWN_ERROR:
-    Serial.println("Unknown error occurred");
-    break;
-  case CAN_NO_RESPONSE_ERROR:
-    Serial.println("No response error");
-    break;
-  case CAN_CONTROLLER_ERROR:
-    Serial.println("CAN CONTROLLER ERROR");
-    break;
-  default:
-    break;
-  }
-  xTaskCreateUniversal(CANRecvTask, "CANRecvTask", 4096, NULL, 1, NULL, 0);
+  // switch (CAN.test())
+  // {
+  // case CAN_SUCCESS:
+  //   Serial.println("Success!!!");
+  //   break;
+  // case CAN_UNKNOWN_ERROR:
+  //   Serial.println("Unknown error occurred");
+  //   break;
+  // case CAN_NO_RESPONSE_ERROR:
+  //   Serial.println("No response error");
+  //   break;
+  // case CAN_CONTROLLER_ERROR:
+  //   Serial.println("CAN CONTROLLER ERROR");
+  //   break;
+  // default:
+  //   break;
+  // }
+  xTaskCreateUniversal(CANRecvTask, "CANRecvTask", 4096, NULL, 3, NULL, 0);
+  xTaskCreateUniversal(checkCtrlPanelConnectionTask, "checkCtrlPanelConnectionTask", 4096, NULL, 2, NULL, 0);
 }
 
 void loop()
 {
-  checkCtrlPanelConnection();
   executeIgnitionSequence();
   delay(100);
 }
@@ -121,9 +120,13 @@ void CANRecvTask(void *pvParameters)
 
 void handleCANMessage(const can_return_t &message)
 {
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  lastCtrlPanelTime = millis();
-  xSemaphoreGive(stateMutex);
+  if (message.id == CAN_ID_FROM_CTRL_ACK)
+  {
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+    lastCtrlPanelTime = millis();
+    xSemaphoreGive(stateMutex);
+  }
+
   if (message.id == CAN_ID_FROM_CONTROL_PANEL)
   {
     // --- Parse Control Panel Data ---
@@ -132,17 +135,17 @@ void handleCANMessage(const can_return_t &message)
     bool fireCmd = (message.data[0] >> 2) & 1;
     bool FDCmd = (message.data[0] >> 3) & 1;
     bool valveSetCmd = (message.data[0] >> 4) & 1;
-    Serial.print("DumpCmd: ");
-    Serial.println(dumpCmd);
-    Serial.print("FillCmd: ");
-    Serial.println(fillCmd);
-    Serial.print("FireCmd: ");
-    Serial.println(fireCmd);
-    Serial.print("FDCmd: ");
-    Serial.println(FDCmd);
-    Serial.print("ValveSetCmd: ");
-    Serial.println(valveSetCmd);
-    digitalWrite(FD_PIN, FDCmd);
+    // Serial.print("DumpCmd: ");
+    // Serial.println(dumpCmd);
+    // Serial.print("FillCmd: ");
+    // Serial.println(fillCmd);
+    // Serial.print("FireCmd: ");
+    // Serial.println(fireCmd);
+    // Serial.print("FDCmd: ");
+    // Serial.println(FDCmd);
+    // Serial.print("ValveSetCmd: ");
+    // Serial.println(valveSetCmd);
+
     // --- Ignition Logic  ---
     xSemaphoreTake(stateMutex, portMAX_DELAY);
     if (fireCmd)
@@ -153,25 +156,25 @@ void handleCANMessage(const can_return_t &message)
         ignitionButtonHoldTimer = millis();
         Serial.println("BUTTON_HELD");
       }
-    }
-    else
-    {
-      if (ignitionState != SEQUENCE_ACTIVE)
+
+      // 20ms以上押し続けられているかチェック
+      if (ignitionState == BUTTON_HELD && (millis() - ignitionButtonHoldTimer > IGNI_BTN_HOLD_DEBOUNCE))
       {
-        ignitionState = IDLE;
-        Serial.println("IGNITION CANCELED");
+        ignitionState = SEQUENCE_ACTIVE;
+        ignitionSequenceTimer = millis(); // Start sequence timer
+        Serial.println("SEQUENCE_ACTIVE");
       }
     }
-
-    if (ignitionState == BUTTON_HELD && (millis() - ignitionButtonHoldTimer > IGNI_BTN_HOLD_DEBOUNCE))
+    else if (ignitionState == BUTTON_HELD)
     {
-      ignitionState = SEQUENCE_ACTIVE;
-      ignitionSequenceTimer = millis(); // Start sequence timer
-      Serial.println("SEQUENCE_ACTIVE");
+      ignitionState = IDLE;
+      Serial.println("IGNITION CANCELED");
     }
+
     xSemaphoreGive(stateMutex);
 
     // --- Other Commands (Direct hardware control, no mutex needed) ---
+    digitalWrite(FD_PIN, FDCmd);
     digitalWrite(FILL_PIN, fillCmd);
     digitalWrite(DUMP_PIN, dumpCmd);
 
@@ -180,7 +183,10 @@ void handleCANMessage(const can_return_t &message)
       uint8_t main_valve_data[2] = {111, 0};                  // valveの角度をこれより開きたいなら2個目の引数で判定するようにする
       CAN.sendData(CAN_ID_TO_MAIN_VALVE, main_valve_data, 2); // valve基板側で-9になるように調整
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      ignitionState = IDLE; // Stop ignition sequence on valve reset
+      if (ignitionState != TIMEOUT)
+      {
+        ignitionState = IDLE; // Stop ignition sequence on valve reset
+      }
       xSemaphoreGive(stateMutex);
     }
   }
@@ -206,7 +212,7 @@ void executeIgnitionSequence()
   if (elapsed > IGNITION_SEQUENCE_TIMEOUT_MS)
   {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    ignitionState = IGNITION_TIMEOUT;
+    ignitionState = TIMEOUT;
     xSemaphoreGive(stateMutex);
     digitalWrite(IGNI_PIN, LOW);
     return;
@@ -223,33 +229,33 @@ void executeIgnitionSequence()
     CAN.sendData(CAN_ID_TO_MAIN_VALVE, main_valve_data, 2); // valve基板側で135になるように調整
     // O2電磁弁をOFF
     digitalWrite(O2_PIN, LOW);
-    xSemaphoreTake(stateMutex, portMAX_DELAY);
-    ignitionState = IDLE; // シーケンス完了
-    xSemaphoreGive(stateMutex);
+    digitalWrite(IGNI_PIN, LOW);
   }
 }
 
-void checkCtrlPanelConnection()
+void checkCtrlPanelConnectionTask(void *pvParameters)
 {
-  unsigned long long lastTime;
-  xSemaphoreTake(stateMutex, portMAX_DELAY);
-  lastTime = lastCtrlPanelTime;
-  xSemaphoreGive(stateMutex);
-  // Send Acknowledgment to Control Panel
-  uint8_t ack_data = 0;
-  CAN.sendData(CAN_ID_PLC_ACK, &ack_data, 1);
-
-  if (millis() - lastTime > CTRL_PANEL_TIMEOUT_MS)
+  while (1)
   {
-    digitalWrite(IGNI_PIN, LOW);
-    digitalWrite(O2_PIN, LOW);
+    // Send Acknowledgment to Control Panel
+    uint8_t ack_data = 0;
+    CAN.sendData(CAN_ID_TO_CTRL_ACK, &ack_data, 1);
 
+    unsigned long long lastTime;
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    if (ignitionState != IDLE)
-    {
-      ignitionState = IDLE;
-      Serial.println("IGN is low because of missing ctrl panel connection");
-    }
+    lastTime = lastCtrlPanelTime;
     xSemaphoreGive(stateMutex);
+
+    if (millis() - lastTime > CTRL_PANEL_TIMEOUT_MS)
+    {
+      digitalWrite(IGNI_PIN, LOW);
+      digitalWrite(O2_PIN, LOW);
+
+      xSemaphoreTake(stateMutex, portMAX_DELAY);
+      // missing control panel connection, reset state
+      ignitionState = TIMEOUT;
+      xSemaphoreGive(stateMutex);
+    }
+    vTaskDelay(100 / portTICK_PERIOD_MS);
   }
 }
