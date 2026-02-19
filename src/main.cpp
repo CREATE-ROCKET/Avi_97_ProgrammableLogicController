@@ -5,13 +5,13 @@
 #include <freertos/semphr.h>
 
 // --- Pin Definitions --- IO22は使える
-constexpr uint8_t DUMP_PIN = 23;
-constexpr uint8_t FILL_PIN = 21;
-constexpr uint8_t O2_PIN = 18;
-constexpr uint8_t FD_PIN = 19;
-constexpr uint8_t IGNI_PIN = 25;
-constexpr uint8_t CAN_RX_PIN = 27;
-constexpr uint8_t CAN_TX_PIN = 13;
+constexpr uint8_t DUMP_PIN = 14;
+constexpr uint8_t FILL_PIN = 17;
+constexpr uint8_t O2_PIN = 27;
+constexpr uint8_t SEPARATE_PIN = 25;
+constexpr uint8_t IGNI_PIN = 32;
+constexpr uint8_t CAN_RX_PIN = 22;
+constexpr uint8_t CAN_TX_PIN = 23;
 
 // --- CAN ID Definitions ---
 constexpr uint32_t CAN_ID_FROM_CONTROL_PANEL = 0x101;
@@ -20,9 +20,9 @@ constexpr uint32_t CAN_ID_FROM_CTRL_ACK = 0x104;
 constexpr uint32_t CAN_ID_TO_MAIN_VALVE = 0x105;
 
 // --- Timing and Threshold Constants ---
-constexpr unsigned long long IGNITION_WAIT_MS = 4500;              // 点火ボタンを押し続けてからイグナイターをONにするまでの時間 (ms)
-constexpr unsigned long long IGNITION_SEQUENCE_TIMEOUT_MS = 10000; // シーケンスのタイムアウト (ms)
-constexpr unsigned long long MAIN_VALVE_OPEN_DELAY_MS = 6000;      // 点火シーケンス開始後,メインバルブを開くまでの時間 (ms)
+constexpr unsigned long long IGNITION_WAIT_MS = 10000;             // 点火ボタンを押し続けてからイグナイターをONにするまでの時間 (ms)
+constexpr unsigned long long IGNITION_SEQUENCE_TIMEOUT_MS = 30000; // シーケンスのタイムアウト (ms)
+constexpr unsigned long long MAIN_VALVE_OPEN_DELAY_MS = 13000;     // 点火シーケンス開始後,メインバルブを開くまでの時間 (ms)
 constexpr unsigned long long CTRL_PANEL_TIMEOUT_MS = 3000;         // コントロールパネルの通信タイムアウト (ms)
 constexpr unsigned long long IGNI_BTN_HOLD_DEBOUNCE = 20;          // 点火ボタンのチャタリング防止時間 (ms)
 // --- Enums for State Management ---
@@ -57,14 +57,14 @@ void setup()
   pinMode(DUMP_PIN, OUTPUT);
   pinMode(FILL_PIN, OUTPUT);
   pinMode(O2_PIN, OUTPUT);
-  pinMode(FD_PIN, OUTPUT);
+  pinMode(SEPARATE_PIN, OUTPUT);
   pinMode(IGNI_PIN, OUTPUT);
 
   digitalWrite(IGNI_PIN, LOW);
   digitalWrite(DUMP_PIN, LOW);
   digitalWrite(FILL_PIN, LOW);
   digitalWrite(O2_PIN, LOW);
-  digitalWrite(FD_PIN, LOW);
+  digitalWrite(SEPARATE_PIN, LOW);
   digitalWrite(IGNI_PIN, LOW);
 
   stateMutex = xSemaphoreCreateMutex();
@@ -99,6 +99,7 @@ void setup()
 void loop()
 {
   executeIgnitionSequence();
+
   delay(100);
 }
 
@@ -133,7 +134,7 @@ void handleCANMessage(const can_return_t &message)
     bool dumpCmd = (message.data[0] >> 0) & 1;
     bool fillCmd = (message.data[0] >> 1) & 1;
     bool fireCmd = (message.data[0] >> 2) & 1;
-    bool FDCmd = (message.data[0] >> 3) & 1;
+    bool separateCmd = (message.data[0] >> 3) & 1;
     bool valveSetCmd = (message.data[0] >> 4) & 1;
     // Serial.print("DumpCmd: ");
     // Serial.println(dumpCmd);
@@ -170,11 +171,10 @@ void handleCANMessage(const can_return_t &message)
       ignitionState = IDLE;
       Serial.println("IGNITION CANCELED");
     }
-
     xSemaphoreGive(stateMutex);
 
     // --- Other Commands (Direct hardware control, no mutex needed) ---
-    digitalWrite(FD_PIN, FDCmd);
+    digitalWrite(SEPARATE_PIN, separateCmd);
     digitalWrite(FILL_PIN, fillCmd);
     digitalWrite(DUMP_PIN, dumpCmd);
 
