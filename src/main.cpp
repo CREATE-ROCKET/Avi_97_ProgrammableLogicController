@@ -6,7 +6,7 @@
 
 // --- Pin Definitions --- IO22は使える
 constexpr uint8_t DUMP_PIN = 14;
-constexpr uint8_t FILL_PIN = 17;
+constexpr uint8_t FILL_PIN = 33;
 constexpr uint8_t O2_PIN = 27;
 constexpr uint8_t SEPARATE_PIN = 25;
 constexpr uint8_t IGNI_PIN = 32;
@@ -180,7 +180,7 @@ void handleCANMessage(const can_return_t &message)
 
     if (valveSetCmd)
     {
-      uint8_t main_valve_data[2] = {111, 0};                  // valveの角度をこれより開きたいなら2個目の引数で判定するようにする
+      uint8_t main_valve_data[2] = {190, 0};                  // valveの角度をこれより開きたいなら2個目の引数で判定するようにする
       CAN.sendData(CAN_ID_TO_MAIN_VALVE, main_valve_data, 2); // valve基板側で-9になるように調整
       xSemaphoreTake(stateMutex, portMAX_DELAY);
       if (ignitionState != TIMEOUT)
@@ -226,7 +226,7 @@ void executeIgnitionSequence()
   if (elapsed > MAIN_VALVE_OPEN_DELAY_MS)
   {
     // Send open command to main valve
-    uint8_t main_valve_data[2] = {255, 1};                  // valveの角度をこれより開きたいなら2個目の引数で判定するようにする
+    uint8_t main_valve_data[2] = {95, 5};                  // valveの角度をこれより開きたいなら2個目の引数で判定するようにする
     CAN.sendData(CAN_ID_TO_MAIN_VALVE, main_valve_data, 2); // valve基板側で135になるように調整
     // O2電磁弁をOFF
     digitalWrite(O2_PIN, LOW);
