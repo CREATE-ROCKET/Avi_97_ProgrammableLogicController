@@ -59,16 +59,16 @@ void stateControlTask(void *pvParameters);
 void executeIgnitionTask(void *pvParameters);
 void solenoidValveTask(void *pvParameters);
 
-void IRAM_ATTR emergencyISR()
-{
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  // セマフォを与えて、待機中のタスクを起こす
-  xSemaphoreGiveFromISR(emergencySemaphore, &xHigherPriorityTaskWoken);
-  if (xHigherPriorityTaskWoken)
-  {
-    portYIELD_FROM_ISR();
-  }
-}
+// void IRAM_ATTR emergencyISR()
+// {
+//   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+//   // セマフォを与えて、待機中のタスクを起こす
+//   xSemaphoreGiveFromISR(emergencySemaphore, &xHigherPriorityTaskWoken);
+//   if (xHigherPriorityTaskWoken)
+//   {
+//     portYIELD_FROM_ISR();
+//   }
+// }
 
 void setup()
 {
@@ -80,7 +80,6 @@ void setup()
   pinMode(O2_PIN, OUTPUT);
   pinMode(SEPARATE_PIN, OUTPUT);
   pinMode(IGNI_PIN, OUTPUT);
-  pinMode(EMERGENCY_SW_PIN, INPUT_PULLDOWN);
 
   digitalWrite(DUMP_PIN, LOW);
   digitalWrite(FILL_PIN, LOW);
@@ -88,11 +87,11 @@ void setup()
   digitalWrite(SEPARATE_PIN, LOW);
   digitalWrite(IGNI_PIN, LOW);
 
-  pinMode(EMERGENCY_SW_PIN, INPUT_PULLDOWN);
+  // pinMode(EMERGENCY_SW_PIN, INPUT_PULLDOWN);
   stateMutex = xSemaphoreCreateMutex();
   emergencySemaphore = xSemaphoreCreateBinary();
   // ピンの立ち上がりエッジ(RISING)で割り込みを発生させる
-  attachInterrupt(digitalPinToInterrupt(EMERGENCY_SW_PIN), emergencyISR, RISING);
+  // attachInterrupt(digitalPinToInterrupt(EMERGENCY_SW_PIN), emergencyISR, RISING);
 
   if (CAN.begin(100E3, CAN_RX_PIN, CAN_TX_PIN))
   { // Rust側は125kbaud
@@ -305,38 +304,44 @@ void executeIgnitionTask(void *pvParameters)
     if (startIgnition)
     {
       // 念のため、過去の割り込みキュー（セマフォ）が残っていれば空にしておく
-      while (xSemaphoreTake(emergencySemaphore, 0) == pdTRUE)
-      {
-        // 空読み
-      }
+      // while (xSemaphoreTake(emergencySemaphore, 0) == pdTRUE)
+      // {
+      //   // 空読み
+      // }
       // xSemaphoreTake(emergencySemaphore, 0);
       // 待機フェーズ
       // 緊急停止(Rust側のemergency_swの再現)はハードウェア割込みで処理するか、
       // 即座に pdTRUE が返る。時間切れまでセマフォが来なければ pdFALSE が返る。
-      if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_WAIT_MS)) == pdTRUE)
-      {
-        goto ABORT; // 時間内に緊急割り込みが発生した
-      }
+      vTaskDelay(pdMS_TO_TICKS(IGNITION_WAIT_MS));
+
+      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_WAIT_MS)) == pdTRUE)
+      // {
+      //   goto ABORT; // 時間内に緊急割り込みが発生した
+      // }
 
       // 点火フェーズ
+      Serial.println("IGNI HIGH");
       digitalWrite(IGNI_PIN, HIGH);
-      if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(MAIN_VALVE_OPEN_DELAY_MS)) == pdTRUE)
-      {
-        goto ABORT; // 時間内に緊急割り込みが発生した
-      }
+      vTaskDelay(pdMS_TO_TICKS(MAIN_VALVE_OPEN_DELAY_MS));
+      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(MAIN_VALVE_OPEN_DELAY_MS)) == pdTRUE)
+      // {
+      //   goto ABORT; // 時間内に緊急割り込みが発生した
+      // }
 
       digitalWrite(IGNI_PIN, LOW);
+      Serial.println("IGNI LOW");
 
       // バルブ開放と最終タイムアウト
       xSemaphoreTake(stateMutex, portMAX_DELAY);
       openValveFlag = true;
       openO2Flag = false;
       xSemaphoreGive(stateMutex);
+      vTaskDelay(pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS));
 
-      if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS)) == pdTRUE)
-      {
-        goto ABORT;
-      }
+      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS)) == pdTRUE)
+      // {
+      //   goto ABORT;
+      // }
 
       xSemaphoreTake(stateMutex, portMAX_DELAY);
       systemState = TIMEOUT;
@@ -347,14 +352,14 @@ void executeIgnitionTask(void *pvParameters)
       digitalWrite(IGNI_PIN, LOW);
       continue;
 
-    ABORT:
-      digitalWrite(IGNI_PIN, LOW);
-      xSemaphoreTake(stateMutex, portMAX_DELAY);
-      openO2Flag = false;
-      systemState = TIMEOUT;
-      hasTimedOut = true;
-      executeIgnitionFlag = false;
-      xSemaphoreGive(stateMutex);
+      // ABORT:
+      //   digitalWrite(IGNI_PIN, LOW);
+      //   xSemaphoreTake(stateMutex, portMAX_DELAY);
+      //   openO2Flag = false;
+      //   systemState = TIMEOUT;
+      //   hasTimedOut = true;
+      //   executeIgnitionFlag = false;
+      //   xSemaphoreGive(stateMutex);
     }
 
     vTaskDelay(pdMS_TO_TICKS(100)); // フラグ監視のための待機
