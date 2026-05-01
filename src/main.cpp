@@ -63,17 +63,7 @@ void stateControlTask(void *pvParameters);
 void executeIgnitionTask(void *pvParameters);
 void solenoidValveTask(void *pvParameters);
 void sendMainValveAngle(int16_t angleX10);
-
-// void IRAM_ATTR emergencyISR()
-// {
-//   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-//   // セマフォを与えて、待機中のタスクを起こす
-//   xSemaphoreGiveFromISR(emergencySemaphore, &xHigherPriorityTaskWoken);
-//   if (xHigherPriorityTaskWoken)
-//   {
-//     portYIELD_FROM_ISR();
-//   }
-// }
+bool shouldAbortIgnitionTask();
 
 void setup()
 {
@@ -155,8 +145,8 @@ void sendMainValveAngle(int16_t angleX10)
 {
   const uint16_t rawAngle = static_cast<uint16_t>(angleX10);
   uint8_t angleData[2] = {
-    static_cast<uint8_t>(rawAngle & 0xFF),
-    static_cast<uint8_t>((rawAngle >> 8) & 0xFF),
+      static_cast<uint8_t>(rawAngle & 0xFF),
+      static_cast<uint8_t>((rawAngle >> 8) & 0xFF),
   };
   CAN.sendData(CAN_ID_TO_MAIN_VALVE, angleData, sizeof(angleData));
 }
@@ -181,6 +171,8 @@ void stateControlTask(void *pvParameters)
 {
   while (1)
   {
+    bool canErrorActive = false;
+
     xSemaphoreTake(stateMutex, portMAX_DELAY);
 
     unsigned long long now = millis();
@@ -197,13 +189,21 @@ void stateControlTask(void *pvParameters)
     }
     else
     {
-      if (systemState != CANERROR)
-      {
-        systemState = CANERROR;
-      }
+      systemState = CANERROR;
+      openO2Flag = false;
+      executeIgnitionFlag = false;
+      canErrorActive = true;
     }
 
     xSemaphoreGive(stateMutex);
+
+    if (canErrorActive)
+    {
+      digitalWrite(O2_PIN, LOW);
+      digitalWrite(FILL_PIN, LOW);
+      digitalWrite(IGNI_PIN, LOW);
+    }
+
     vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
@@ -212,8 +212,7 @@ void stateControlTask(void *pvParameters)
 void solenoidValveTask(void *pvParameters)
 {
   bool prevO2TestFlag = false;
-  unsigned long o2TestEndTime = 0;
-  bool isO2TestActive = false;
+  bool manualO2Open = false;
 
   while (1)
   {
@@ -232,6 +231,22 @@ void solenoidValveTask(void *pvParameters)
     // bool mainResetFlag = ((buttons >> 6) & 1) == 1;
     bool mainValveOpenFlag = ((buttons >> 6) & 1) == 1;
     bool isIgnitionRunning = (currentState == IGNITION) || (fireFlag && currentState == IDLE);
+
+    if (currentState == CANERROR)
+    {
+      openO2Flag = false;
+      executeIgnitionFlag = false;
+      manualO2Open = false;
+      prevO2TestFlag = o2TestFlag;
+      xSemaphoreGive(stateMutex);
+
+      digitalWrite(FILL_PIN, LOW);
+      digitalWrite(O2_PIN, LOW);
+      digitalWrite(IGNI_PIN, LOW);
+
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
 
     if (!isIgnitionRunning)
     {
@@ -258,44 +273,47 @@ void solenoidValveTask(void *pvParameters)
     if (valveSetFlag && !isIgnitionRunning)
       mainValveAngleX10 = MAIN_VALVE_CLOSED_ANGLE_X10;
 
-    // if (mainResetFlag && currentState == TIMEOUT)
-    // {
-    //   systemState = IDLE;
-    //   hasTimedOut = false;
-    // }
-
     if (mainValveOpenFlag)
       mainValveAngleX10 = MAIN_VALVE_OPEN_ANGLE_X10;
 
-    // --- O2 Test のタイマー＆エッジ検出ロジック ---
+    // --- O2 Test edge logic ---
     if (isIgnitionRunning)
     {
-      isO2TestActive = false; // 点火中はテスト無効
+      manualO2Open = false;
     }
-    else if (o2TestFlag && !prevO2TestFlag)
+    else
     {
-      // ボタンが押された瞬間(立ち上がりエッジ)に3秒(3000ms)のタイマーセット
-      isO2TestActive = true;
-      o2TestEndTime = millis() + 3000;
-    }
-    prevO2TestFlag = o2TestFlag; // 前回の状態を保存
-
-    // タイマー完了チェック
-    if (isO2TestActive)
-    {
-      if (millis() >= o2TestEndTime)
+      if (o2TestFlag && !prevO2TestFlag)
       {
-        isO2TestActive = false; // 3秒経過でオフ
+        manualO2Open = true;
+      }
+      else if (!o2TestFlag && prevO2TestFlag)
+      {
+        manualO2Open = false;
       }
     }
+    prevO2TestFlag = o2TestFlag;
 
-    // 点火シーケンスによるO2開放、またはO2テストタイマーによる開放の論理和
-    bool isO2Open = currentOpenO2Flag || isO2TestActive;
+    bool isO2Open = currentOpenO2Flag || (!isIgnitionRunning && manualO2Open);
     digitalWrite(O2_PIN, isO2Open);
 
     xSemaphoreGive(stateMutex);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
+}
+
+bool shouldAbortIgnitionTask()
+{
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  bool shouldAbort = (systemState == CANERROR) || !executeIgnitionFlag;
+  xSemaphoreGive(stateMutex);
+
+  if (shouldAbort)
+  {
+    digitalWrite(IGNI_PIN, LOW);
+  }
+
+  return shouldAbort;
 }
 
 // 点火シーケンス
@@ -311,30 +329,20 @@ void executeIgnitionTask(void *pvParameters)
 
     if (startIgnition)
     {
-      // 念のため、過去の割り込みキュー（セマフォ）が残っていれば空にしておく
-      // while (xSemaphoreTake(emergencySemaphore, 0) == pdTRUE)
-      // {
-      //   // 空読み
-      // }
-      // xSemaphoreTake(emergencySemaphore, 0);
-      // 待機フェーズ
-      // 緊急停止(Rust側のemergency_swの再現)はハードウェア割込みで処理するか、
-      // 即座に pdTRUE が返る。時間切れまでセマフォが来なければ pdFALSE が返る。
       vTaskDelay(pdMS_TO_TICKS(IGNITION_WAIT_MS));
-
-      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_WAIT_MS)) == pdTRUE)
-      // {
-      //   goto ABORT; // 時間内に緊急割り込みが発生した
-      // }
+      if (shouldAbortIgnitionTask())
+      {
+        continue;
+      }
 
       // 点火フェーズ
       Serial.println("IGNI HIGH");
       digitalWrite(IGNI_PIN, HIGH);
       vTaskDelay(pdMS_TO_TICKS(MAIN_VALVE_OPEN_DELAY_MS));
-      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(MAIN_VALVE_OPEN_DELAY_MS)) == pdTRUE)
-      // {
-      //   goto ABORT; // 時間内に緊急割り込みが発生した
-      // }
+      if (shouldAbortIgnitionTask())
+      {
+        continue;
+      }
 
       digitalWrite(IGNI_PIN, LOW);
       Serial.println("IGNI LOW");
@@ -345,11 +353,10 @@ void executeIgnitionTask(void *pvParameters)
       openO2Flag = false;
       xSemaphoreGive(stateMutex);
       vTaskDelay(pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS));
-
-      // if (xSemaphoreTake(emergencySemaphore, pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS)) == pdTRUE)
-      // {
-      //   goto ABORT;
-      // }
+      if (shouldAbortIgnitionTask())
+      {
+        continue;
+      }
 
       xSemaphoreTake(stateMutex, portMAX_DELAY);
       systemState = TIMEOUT;
@@ -359,15 +366,6 @@ void executeIgnitionTask(void *pvParameters)
 
       digitalWrite(IGNI_PIN, LOW);
       continue;
-
-      // ABORT:
-      //   digitalWrite(IGNI_PIN, LOW);
-      //   xSemaphoreTake(stateMutex, portMAX_DELAY);
-      //   openO2Flag = false;
-      //   systemState = TIMEOUT;
-      //   hasTimedOut = true;
-      //   executeIgnitionFlag = false;
-      //   xSemaphoreGive(stateMutex);
     }
 
     vTaskDelay(pdMS_TO_TICKS(100)); // フラグ監視のための待機
