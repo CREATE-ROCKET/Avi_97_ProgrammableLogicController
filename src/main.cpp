@@ -20,6 +20,10 @@ constexpr uint32_t CAN_ID_TO_CTRL_MAIN_STATE = 0x103;
 constexpr uint32_t CAN_ID_TO_MAIN_VALVE = 0x105;
 constexpr uint32_t CAN_ID_FROM_MAIN_VAVLE = 0x107;
 
+// --- Main Valve Angle Definitions ---
+constexpr int16_t MAIN_VALVE_CLOSED_ANGLE_X10 = -90; // -9.0 deg
+constexpr int16_t MAIN_VALVE_OPEN_ANGLE_X10 = 1350;  // 135.0 deg
+
 // --- Time Definitions ---
 constexpr unsigned long long IGNITION_WAIT_MS = 20000;             // 点火ボタンを押してからイグナイターON (ms)
 constexpr unsigned long long MAIN_VALVE_OPEN_DELAY_MS = 2000;      // イグナイターONからメインバルブを開くまでの時間 (ms)
@@ -41,7 +45,7 @@ SemaphoreHandle_t emergencySemaphore;
 
 STATE systemState = IDLE;
 bool hasTimedOut = false;
-bool openValveFlag = false;
+int16_t mainValveAngleX10 = MAIN_VALVE_CLOSED_ANGLE_X10;
 bool openO2Flag = false;
 bool executeIgnitionFlag = false;
 
@@ -58,6 +62,7 @@ void canTransmitTask(void *pvParameters);
 void stateControlTask(void *pvParameters);
 void executeIgnitionTask(void *pvParameters);
 void solenoidValveTask(void *pvParameters);
+void sendMainValveAngle(int16_t angleX10);
 
 // void IRAM_ATTR emergencyISR()
 // {
@@ -146,25 +151,26 @@ void canReceiveTask(void *pvParameters)
 }
 
 // メインバルブへの指令値と、現在のステートの定期送信
+void sendMainValveAngle(int16_t angleX10)
+{
+  const uint16_t rawAngle = static_cast<uint16_t>(angleX10);
+  uint8_t angleData[2] = {
+    static_cast<uint8_t>(rawAngle & 0xFF),
+    static_cast<uint8_t>((rawAngle >> 8) & 0xFF),
+  };
+  CAN.sendData(CAN_ID_TO_MAIN_VALVE, angleData, sizeof(angleData));
+}
+
 void canTransmitTask(void *pvParameters)
 {
-  bool lastValveAngle = false;
-
   while (1)
   {
     xSemaphoreTake(stateMutex, portMAX_DELAY);
-    bool curAngle = openValveFlag;
+    int16_t valveAngleX10 = mainValveAngleX10;
     uint8_t mainState = systemState;
     xSemaphoreGive(stateMutex);
 
-    if (curAngle != lastValveAngle)
-    {
-      uint8_t cmd = curAngle ? 1 : 0;
-      CAN.sendData(CAN_ID_TO_MAIN_VALVE, &cmd, 1);
-      lastValveAngle = curAngle;
-      vTaskDelay(pdMS_TO_TICKS(5));
-    }
-
+    sendMainValveAngle(valveAngleX10);
     CAN.sendData(CAN_ID_TO_CTRL_MAIN_STATE, &mainState, 1);
     vTaskDelay(pdMS_TO_TICKS(50));
   }
@@ -225,10 +231,14 @@ void solenoidValveTask(void *pvParameters)
     bool o2TestFlag = ((buttons >> 5) & 1) == 1;
     // bool mainResetFlag = ((buttons >> 6) & 1) == 1;
     bool mainValveOpenFlag = ((buttons >> 6) & 1) == 1;
+    bool isIgnitionRunning = (currentState == IGNITION) || (fireFlag && currentState == IDLE);
 
-    digitalWrite(DUMP_PIN, dumpFlag);
-    digitalWrite(FILL_PIN, fillFlag);
-    digitalWrite(SEPARATE_PIN, separateFlag);
+    if (!isIgnitionRunning)
+    {
+      digitalWrite(DUMP_PIN, dumpFlag);
+      digitalWrite(FILL_PIN, fillFlag);
+      digitalWrite(SEPARATE_PIN, separateFlag);
+    }
 
     // 各種フラグの処理
     if (fireFlag)
@@ -241,12 +251,12 @@ void solenoidValveTask(void *pvParameters)
       }
       else if (currentState == TIMEOUT)
       {
-        openValveFlag = true;
+        mainValveAngleX10 = MAIN_VALVE_OPEN_ANGLE_X10;
       }
     }
 
-    if (valveSetFlag)
-      openValveFlag = false;
+    if (valveSetFlag && !isIgnitionRunning)
+      mainValveAngleX10 = MAIN_VALVE_CLOSED_ANGLE_X10;
 
     // if (mainResetFlag && currentState == TIMEOUT)
     // {
@@ -255,11 +265,9 @@ void solenoidValveTask(void *pvParameters)
     // }
 
     if (mainValveOpenFlag)
-      openValveFlag = true;
+      mainValveAngleX10 = MAIN_VALVE_OPEN_ANGLE_X10;
 
     // --- O2 Test のタイマー＆エッジ検出ロジック ---
-    bool isIgnitionRunning = (currentState == IGNITION);
-
     if (isIgnitionRunning)
     {
       isO2TestActive = false; // 点火中はテスト無効
@@ -333,7 +341,7 @@ void executeIgnitionTask(void *pvParameters)
 
       // バルブ開放と最終タイムアウト
       xSemaphoreTake(stateMutex, portMAX_DELAY);
-      openValveFlag = true;
+      mainValveAngleX10 = MAIN_VALVE_OPEN_ANGLE_X10;
       openO2Flag = false;
       xSemaphoreGive(stateMutex);
       vTaskDelay(pdMS_TO_TICKS(IGNITION_SEQUENCE_TIMEOUT_MS));
